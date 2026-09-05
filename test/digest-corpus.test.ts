@@ -17,10 +17,14 @@ import { ToolDefinition, type JsonObject } from '../src/index.js';
  * the usual response to a pin that refuses a tool you trust is to delete the
  * pin.
  *
- * Rows this language does not match the reference on are asserted as
- * DIVERGENCES rather than skipped. A skip removes the row from the report; this
- * keeps it visible and goes red the moment either side changes, which is what
- * makes the eventual fix detectable. See G-20.
+ * **All thirteen rows agree as of 2026-09-04.** Three did not: dig-0002 and
+ * dig-0003 were closed in the REFERENCE, which stopped rendering an empty
+ * map-typed field as `[]`, and dig-0007 was closed HERE, by coercing an absent
+ * description to `''` as the reference always has. Opposite directions, each
+ * judged on its own merits. G-20.
+ *
+ * Every digest in the corpus changed as a result. A pin recorded before that
+ * date matches none of the three implementations and has to be recomputed.
  */
 interface DigestCase {
   id: string;
@@ -28,7 +32,6 @@ interface DigestCase {
   payload: JsonObject;
   digest: { php: string; ts: string; py: string };
   agrees: boolean;
-  divergence?: string;
   notes: string;
 }
 
@@ -36,39 +39,68 @@ const corpus = JSON.parse(
   readFileSync(new URL('./fixtures/mcp-tool-digest.json', import.meta.url), 'utf8'),
 ) as { cases: DigestCase[] };
 
-const agreeing = corpus.cases.filter((entry) => entry.agrees);
-const diverging = corpus.cases.filter((entry) => !entry.agrees);
+const byId = new Map(corpus.cases.map((entry) => [entry.id, entry]));
+
+function payload(id: string): JsonObject {
+  const entry = byId.get(id);
+
+  if (entry === undefined) throw new Error(`The corpus has no row ${id}.`);
+
+  return entry.payload;
+}
 
 describe('the cross-language tool-digest corpus', () => {
   it('is the whole suite, not a subset someone trimmed to green', () => {
-    expect(corpus.cases).toHaveLength(10);
+    expect(corpus.cases).toHaveLength(13);
   });
 
   it.each(corpus.cases)('$id produces this language’s recorded digest ($title)', ({ payload, digest }) => {
     expect(ToolDefinition.fromPayload(payload).digest()).toBe(digest.ts);
   });
 
-  it.each(agreeing)('$id agrees with the PHP reference, so a pin transfers ($title)', ({ payload, digest }) => {
+  it.each(corpus.cases)('$id agrees with the PHP reference, so a pin transfers ($title)', ({ payload, digest }) => {
     expect(ToolDefinition.fromPayload(payload).digest()).toBe(digest.php);
   });
 
-  it.each(diverging)('$id STILL diverges from the reference ($divergence)', ({ payload, digest }) => {
-    // Asserted in the negative on purpose. When someone fixes G-20 this test
-    // fails, which forces the corpus and the manifest's gap statement to be
-    // updated in the same change rather than left claiming a divergence that
-    // no longer exists.
-    expect(ToolDefinition.fromPayload(payload).digest()).not.toBe(digest.php);
+  it('records no divergence, because there is none left to record', () => {
+    // The three rows that used to be asserted in the NEGATIVE are gone, which
+    // is what closing G-20 looks like from here. Kept as a positive assertion
+    // rather than deleted: a suite that simply stopped mentioning divergence
+    // could not tell "fixed" from "no longer checked".
+    expect(corpus.cases.filter((entry) => !entry.agrees)).toEqual([]);
   });
 
-  it('diverges on exactly the three rows the manifest names', () => {
-    expect(diverging.map((entry) => entry.id)).toEqual(['dig-0002', 'dig-0003', 'dig-0007']);
-  });
-
-  it('agrees with Python on EVERY row, including the divergent ones', () => {
-    // The useful signal. Two ports disagreeing with the reference in the same
-    // place is one reference-side artefact plus one coercion choice; two ports
-    // disagreeing with the reference in DIFFERENT places would be two
-    // independent bugs, and a much worse position.
+  it('agrees with Python on EVERY row', () => {
+    // Two ports disagreeing with the reference in the same place was the useful
+    // signal while G-20 was open — one reference-side artefact plus one coercion
+    // choice, rather than two independent port bugs. Kept now because it is the
+    // cheapest way to notice one port being fixed without the other.
     for (const entry of corpus.cases) expect(entry.digest.ts).toBe(entry.digest.py);
+  });
+
+  it('reads an ABSENT schema and an explicitly empty one as the same tool', () => {
+    // dig-0002 omits `inputSchema`; dig-0011 sends `{}`. A server that starts
+    // emitting a field it used to leave out has not rewritten its tool, and a
+    // pin that broke on that would be deleted by the first operator it hit.
+    expect(ToolDefinition.fromPayload(payload('dig-0002')).digest()).toBe(
+      ToolDefinition.fromPayload(payload('dig-0011')).digest(),
+    );
+  });
+
+  it('digests an empty LIST as a list, so the reference fix did not over-reach', () => {
+    // The guard on the FIX rather than on the defect. `required` is a list and
+    // `properties` is a map; a rule that promoted every empty array to an object
+    // would have rendered `"required": []` as `{}` — green on the rows the fix
+    // was for, and broken on a far more ordinary one. This language never had
+    // the ambiguity, so this row is what makes it the reference's check too.
+    const asList = ToolDefinition.fromPayload(payload('dig-0012'));
+    const asMap = ToolDefinition.fromPayload({
+      name: 'search',
+      description: 'd',
+      inputSchema: { type: 'object', properties: {}, required: {} },
+    });
+
+    expect(asList.digest()).not.toBe(asMap.digest());
+    expect(asList.digest()).toBe(byId.get('dig-0012')?.digest.php);
   });
 });

@@ -58,7 +58,14 @@ export type ProtocolVersion = (typeof PROTOCOL_VERSIONS)[number];
 export class ToolDefinition {
   constructor(
     readonly name: string,
-    readonly description: string | null,
+    /**
+     * Never null. A tool with no description is still callable — the model just
+     * gets less to go on — and a missing one is coerced to `''` rather than kept
+     * as `null` so the DIGEST matches the reference's. That value is a pin's
+     * material, and a pin an operator computes against a PHP deployment has to
+     * validate here. See G-20.
+     */
+    readonly description: string,
     readonly inputSchema: JsonObject,
     readonly title: string | null = null,
     readonly annotations: JsonObject = {},
@@ -73,7 +80,10 @@ export class ToolDefinition {
 
     return new ToolDefinition(
       name,
-      typeof payload.description === 'string' ? payload.description : null,
+      // Absent becomes '', not null. Refusing a terse server would be worse, and
+      // keeping null made this port's digest disagree with every pin computed
+      // against the reference.
+      typeof payload.description === 'string' ? payload.description : '',
       isJsonObject(payload.inputSchema) ? payload.inputSchema : {},
       typeof payload.title === 'string' ? payload.title : null,
       isJsonObject(payload.annotations) ? payload.annotations : {},
