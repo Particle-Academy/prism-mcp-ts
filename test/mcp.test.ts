@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   Client,
+  KNOWN_PROTOCOL_VERSIONS,
+  LATEST_PROTOCOL_VERSION,
   MirroredParameters,
+  PROTOCOL_VERSIONS,
   ResultGuard,
   ToolDefinition,
   TrustPolicy,
   denyAll,
+  isStatelessProtocol,
   type JsonObject,
   type JsonValue,
   type Transport,
@@ -249,13 +253,38 @@ describe('mirrored parameters', () => {
 });
 
 describe('the client', () => {
-  it('refuses a protocol version it does not speak', async () => {
-    const { send } = transport({ initialize: { protocolVersion: '1999-01-01' } });
-    const client = new Client({ server: 'docs', transport: send });
+  it('knows the revisions it does not speak by name', () => {
+    // There is no handshake to test any more. `2026-07-28` REMOVED `initialize`
+    // and made the protocol stateless, the PHP reference has no such method,
+    // and this port carried one anyway -- which made failures read backwards
+    // (prism-mcp-py#1, G-52).
+    //
+    // What replaces it is the ability to NAME a revision rather than negotiate
+    // one. The older entries exist so a server announcing one can be refused by
+    // name: an error naming both sides is actionable, one naming neither is a
+    // support ticket.
+    expect(LATEST_PROTOCOL_VERSION).toBe('2026-07-28');
+    expect(PROTOCOL_VERSIONS).toEqual(['2026-07-28']);
 
-    await expect(client.initialize()).rejects.toMatchObject({
-      code: 'unsupported_protocol_version',
-    });
+    // Every revision in the wild, and none of them spoken. They are a stateful
+    // handshake then a session -- a different protocol wearing the same name,
+    // not an older one.
+    for (const legacy of ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']) {
+      expect(KNOWN_PROTOCOL_VERSIONS).toContain(legacy);
+      expect(PROTOCOL_VERSIONS as readonly string[]).not.toContain(legacy);
+      expect(isStatelessProtocol(legacy)).toBe(false);
+    }
+
+    expect(isStatelessProtocol(LATEST_PROTOCOL_VERSION)).toBe(true);
+  });
+
+  it('no longer offers a handshake at all', () => {
+    // The guard against it coming back. A host reaching for initialize() should
+    // find nothing there, rather than a version negotiation for a protocol that
+    // does not have one.
+    const client = new Client({ server: 'docs', transport: transport({}).send });
+
+    expect((client as unknown as Record<string, unknown>).initialize).toBeUndefined();
   });
 
   it('is UNDECLARED by default, so listing refuses', async () => {

@@ -40,7 +40,45 @@ export class McpError extends Error {
 }
 
 /** The protocol revisions this client speaks. */
+/**
+ * Every MCP revision this client KNOWS ABOUT, newest first.
+ *
+ * Only `2026-07-28` is spoken. The older entries exist so a server announcing
+ * one can be refused BY NAME rather than by "unsupported version" -- an error
+ * naming both sides is actionable, one naming neither is a support ticket.
+ * Mirrors `Prism\Mcp\Enums\ProtocolVersion` in the reference.
+ *
+ * The split matters more than it looks. `2026-07-28` removed `initialize`
+ * outright and made the protocol stateless: every request carries its own
+ * protocol version, capabilities and client info in `_meta`. Everything from
+ * `2025-11-25` back does the opposite -- a stateful handshake, then a session.
+ * They are two protocols wearing one name, which is why speaking both is a
+ * whole second implementation rather than a compatibility branch.
+ */
+export const KNOWN_PROTOCOL_VERSIONS = [
+  '2026-07-28',
+  '2025-11-25',
+  '2025-06-18',
+  '2025-03-26',
+  '2024-11-05',
+] as const;
+
+/** The revisions this client will actually talk. */
 export const PROTOCOL_VERSIONS = ['2026-07-28'] as const;
+
+/** The newest revision this client speaks. */
+export const LATEST_PROTOCOL_VERSION = '2026-07-28';
+
+/**
+ * Whether a revision uses per-request `_meta` rather than a handshake.
+ *
+ * `2026-07-28` and later are stateless. Everything earlier opens with
+ * `initialize` and then carries a session, which this client does not model at
+ * all -- so `false` here means "different protocol", not "older one".
+ */
+export function isStatelessProtocol(version: string): boolean {
+  return version === LATEST_PROTOCOL_VERSION;
+}
 export type ProtocolVersion = (typeof PROTOCOL_VERSIONS)[number];
 
 // -- tool definitions --------------------------------------------------------
@@ -470,7 +508,6 @@ export interface ClientOptions {
   trust?: TrustPolicy;
   guard?: ResultGuard;
   gate?: ToolGate;
-  protocolVersion?: ProtocolVersion;
 }
 
 export interface McpToolResult {
@@ -489,8 +526,6 @@ export class Client {
 
   readonly #gate: ToolGate;
 
-  readonly #protocolVersion: ProtocolVersion;
-
   constructor(options: ClientOptions) {
     this.#server = options.server;
     this.#transport = options.transport;
@@ -498,30 +533,25 @@ export class Client {
     this.#trust = options.trust ?? TrustPolicy.undeclared();
     this.#guard = options.guard ?? new ResultGuard();
     this.#gate = options.gate ?? allowAll;
-    this.#protocolVersion = options.protocolVersion ?? '2026-07-28';
   }
 
-  async initialize(): Promise<ProtocolVersion> {
-    const reply = await this.#transport({
-      method: 'initialize',
-      params: { protocolVersion: this.#protocolVersion },
-    });
-
-    if (!isJsonObject(reply)) {
-      throw new McpError('protocol_failure', 'The server did not answer initialize with an object.');
-    }
-
-    const version = reply.protocolVersion;
-
-    if (typeof version !== 'string' || !PROTOCOL_VERSIONS.includes(version as ProtocolVersion)) {
-      throw new McpError(
-        'unsupported_protocol_version',
-        `The server [${this.#server}] speaks protocol [${String(version)}], which this client does not.`,
-      );
-    }
-
-    return version as ProtocolVersion;
-  }
+  // There is deliberately no `initialize()` here.
+  //
+  // `2026-07-28` REMOVED the handshake -- the protocol is stateless, and every
+  // request carries its own version and client info. The PHP reference has no
+  // such method for that reason, and its transport contract says reproducing
+  // the session-based shape "would be carrying scaffolding for a protocol this
+  // client does not speak".
+  //
+  // This port had one anyway, and it made failures read backwards: a caller
+  // invoked a handshake that exists only here, offered a version the wire
+  // protocol has no handshake to agree on, and got an error blaming a version
+  // mismatch -- when the real answer is that the two sides are different
+  // protocols. Reported from the outside as prism-mcp-py#1, tracked as G-52.
+  //
+  // Removed rather than widened. Accepting `2024-11-05` here would have let the
+  // handshake succeed and then failed further in, on a session-based shape
+  // nothing else in this package models -- a claim of support that is not one.
 
   /**
    * The tools this client will offer, after trust and after the annotation rules.
