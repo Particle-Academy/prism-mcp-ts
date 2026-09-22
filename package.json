@@ -1,6 +1,6 @@
 {
   "name": "@particle-academy/prism-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Consuming MCP servers as Prism tools, across an explicit trust boundary. TypeScript.",
   "type": "module",
   "sideEffects": false,
