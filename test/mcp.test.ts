@@ -235,6 +235,18 @@ describe('mirrored parameters', () => {
     ).toThrowError(/not a legal HTTP header name/);
   });
 
+  it('REFUSES an annotation that is not a string, as the reference does — never skips it', () => {
+    // The reference (PHP MirroredParameters::annotation) refuses `! is_string($name)`. This port used to
+    // SKIP a non-string annotation, so a server built on it published a schema that a spec client drops:
+    // Claude Code excluded every tool of an app that wrote `'x-mcp-header': { type: 'string' }`, while this
+    // package's own server registered and served them without a word (genie2, 2026-10-13).
+    for (const bad of [{ type: 'string' }, '', 42, true, null, ['Region']]) {
+      expect(() =>
+        MirroredParameters.fromSchema('t', { properties: { x: { type: 'string', 'x-mcp-header': bad } } }),
+      ).toThrowError(/not a legal HTTP header name|must be a header name/);
+    }
+  });
+
   it('refuses a type the spec does not allow, including number', () => {
     // `number` is deliberately absent from the allowed list.
     expect(() =>
