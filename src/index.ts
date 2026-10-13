@@ -480,6 +480,16 @@ function walkSchema(
 
     const annotation = raw[MIRROR_ANNOTATION];
 
+    // PRESENT is what decides, as in the reference (`! is_string($name)` refuses): an annotation that is not a
+    // string is a broken one, never an absent one. Skipping it let a server publish a schema that a spec client
+    // drops — Claude Code excluded every tool written `'x-mcp-header': { type: 'string' }` (genie2, 2026-10-13).
+    if (Object.hasOwn(raw, MIRROR_ANNOTATION) && typeof annotation !== 'string') {
+      throw new McpError(
+        'mirrored_parameter_refused',
+        `The tool [${tool}] is excluded: the [${MIRROR_ANNOTATION}] value on [${[...path, key].join('.')}] must be a header name (a string), not ${annotation === null ? 'null' : Array.isArray(annotation) ? 'an array' : typeof annotation}.`,
+      );
+    }
+
     if (typeof annotation === 'string') {
       const type = raw.type;
 
