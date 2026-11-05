@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - **Breaking:** an explicit empty trust allowlist now raises before discovery,
   with a message distinct from missing trust. Wildcard empty-server discovery
