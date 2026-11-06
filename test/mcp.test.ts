@@ -60,7 +60,9 @@ describe('trust', () => {
     const declaredEmpty = TrustPolicy.allowing([]);
 
     expect(declaredEmpty.isDeclared()).toBe(true);
-    expect(declaredEmpty.admit('docs', [ToolDefinition.fromPayload(searchTool)])).toEqual([]);
+    expect(() => declaredEmpty.admit('docs', [ToolDefinition.fromPayload(searchTool)])).toThrowError(
+      /empty tool allowlist/,
+    );
   });
 
   it('admits only the tools that were named', () => {

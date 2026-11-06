@@ -10,7 +10,7 @@ export function isJsonObject(value: unknown): value is JsonObject {
 }
 
 export type McpErrorCode =
-  /** A server was reached that nobody declared trust in. */
+  /** Discovery was refused because no usable trust declaration exists. */
   | 'server_not_trusted'
   /** A tool's definition changed after it was pinned. */
   | 'tool_definition_changed'
@@ -218,14 +218,8 @@ export class TrustPolicy {
     return this.everyTool || this.allowedTools !== null;
   }
 
-  /**
-   * Filter a server's tool list down to what was declared.
-   *
-   * Throws on an UNDECLARED server rather than returning nothing: silently
-   * returning an empty list would look identical to a server with no tools, and
-   * the two need opposite responses from whoever reads it.
-   */
-  admit(server: string, tools: readonly ToolDefinition[]): ToolDefinition[] {
+  /** Refuse misconfiguration before the client invokes its transport. */
+  assertDeclaredFor(server: string): void {
     if (!this.isDeclared()) {
       throw new McpError(
         'server_not_trusted',
@@ -234,6 +228,34 @@ export class TrustPolicy {
           'Declare which tools you trust, or trust every tool explicitly.',
       );
     }
+
+    if (!this.everyTool && this.allowedTools?.length === 0) {
+      throw new McpError(
+        'server_not_trusted',
+        `The MCP server [${server}] has an empty tool allowlist. An empty allowlist and no allowlist ` +
+          'are different mistakes. Name the tools you trust, or trust every tool explicitly.',
+      );
+    }
+  }
+
+  namesExplicitly(tool: string): boolean {
+    return !this.everyTool && (this.allowedTools?.includes(tool) ?? false);
+  }
+
+  namedButNotOffered(offered: readonly string[]): string[] {
+    const names = new Set(offered);
+    return this.everyTool ? [] : (this.allowedTools ?? []).filter((name) => !names.has(name));
+  }
+
+  /**
+   * Filter a server's tool list down to what was declared.
+   *
+   * Throws on an UNDECLARED server rather than returning nothing: silently
+   * returning an empty list would look identical to a server with no tools, and
+   * the two need opposite responses from whoever reads it.
+   */
+  admit(server: string, tools: readonly ToolDefinition[]): ToolDefinition[] {
+    this.assertDeclaredFor(server);
 
     const admitted = this.everyTool
       ? [...tools]
@@ -317,7 +339,7 @@ export class ResultGuard {
   readonly #filter?: ResultGuardOptions['filter'];
 
   constructor(options: ResultGuardOptions = {}) {
-    this.#maxBytes = options.maxBytes ?? 64 * 1024;
+    this.#maxBytes = options.maxBytes ?? 262144;
     this.#frameProvenance = options.frameProvenance ?? true;
     this.#filter = options.filter;
   }
@@ -537,12 +559,21 @@ export interface TransportRequest {
 /** How this package reaches a server. An interface, so the package has no dependencies. */
 export type Transport = (request: TransportRequest) => Promise<JsonValue>;
 
+/** Configured identifiers only; no server response or tool description enters this channel. */
+export interface McpDiagnostic {
+  readonly code: 'trusted_tools_not_offered';
+  readonly server: string;
+  readonly toolNames: readonly string[];
+}
+
 export interface ClientOptions {
   server: string;
   transport: Transport;
   trust?: TrustPolicy;
   guard?: ResultGuard;
   gate?: ToolGate;
+  /** Replaces the native warning. A failure, including a rejected promise, aborts discovery. */
+  onDiagnostic?: (diagnostic: McpDiagnostic) => void | Promise<void>;
 }
 
 export interface McpToolResult {
@@ -561,6 +592,10 @@ export class Client {
 
   readonly #gate: ToolGate;
 
+  readonly #onDiagnostic?: ClientOptions['onDiagnostic'];
+
+  readonly #excluded = new Map<string, string>();
+
   constructor(options: ClientOptions) {
     this.#server = options.server;
     this.#transport = options.transport;
@@ -568,6 +603,10 @@ export class Client {
     this.#trust = options.trust ?? TrustPolicy.undeclared();
     this.#guard = options.guard ?? new ResultGuard();
     this.#gate = options.gate ?? allowAll;
+    if (options.onDiagnostic !== undefined && typeof options.onDiagnostic !== 'function') {
+      throw new TypeError('onDiagnostic must be a function.');
+    }
+    this.#onDiagnostic = options.onDiagnostic;
   }
 
   // There is deliberately no `initialize()` here.
@@ -596,6 +635,8 @@ export class Client {
    * is guessing what the server meant by an illegal header name.
    */
   async listTools(): Promise<ToolDefinition[]> {
+    this.#trust.assertDeclaredFor(this.#server);
+    this.#excluded.clear();
     const reply = await this.#transport({ method: 'tools/list' });
 
     if (!isJsonObject(reply) || !Array.isArray(reply.tools)) {
@@ -603,18 +644,47 @@ export class Client {
     }
 
     const declared = reply.tools.filter(isJsonObject).map(ToolDefinition.fromPayload);
-    const admitted = this.#trust.admit(this.#server, declared);
-
-    return admitted.filter((tool) => {
+    const valid = declared.filter((tool) => {
       try {
         MirroredParameters.fromSchema(tool.name, tool.inputSchema);
 
         return true;
       } catch (error) {
-        if (error instanceof McpError && error.code === 'mirrored_parameter_refused') return false;
+        if (error instanceof McpError && error.code === 'mirrored_parameter_refused') {
+          this.#excluded.set(tool.name, error.message);
+          if (this.#trust.namesExplicitly(tool.name)) {
+            throw new McpError(
+              'mirrored_parameter_refused',
+              `The explicitly trusted tool [${tool.name}] on server [${this.#server}] has invalid ` +
+                'mirrored-parameter annotations and was excluded.',
+            );
+          }
+          return false;
+        }
         throw error;
       }
     });
+
+    const missing = this.#trust.namedButNotOffered(valid.map((tool) => tool.name));
+    if (missing.length > 0) {
+      const diagnostic: McpDiagnostic = Object.freeze({
+        code: 'trusted_tools_not_offered',
+        server: this.#server,
+        toolNames: Object.freeze(missing),
+      });
+      if (this.#onDiagnostic) await this.#onDiagnostic(diagnostic);
+      else process.emitWarning(
+        `The MCP server [${this.#server}] does not offer these trusted tools: ${missing.join(', ')}.`,
+        { code: 'MCP_TRUSTED_TOOLS_NOT_OFFERED' },
+      );
+    }
+
+    return this.#trust.admit(this.#server, valid);
+  }
+
+  /** A detached snapshot; changing it cannot alter the client's exclusion state. */
+  excluded(): Readonly<Record<string, string>> {
+    return Object.freeze(Object.fromEntries(this.#excluded));
   }
 
   async callTool(tool: ToolDefinition, args: JsonObject = {}): Promise<McpToolResult> {
@@ -640,12 +710,14 @@ export class Client {
     const content = Array.isArray(reply.content) ? reply.content : [];
     const text = content
       .filter(isJsonObject)
-      .map((part) => (typeof part.text === 'string' ? part.text : ''))
+      .map((part) => part.type === 'text' && typeof part.text === 'string'
+        ? part.text
+        : `[${typeof part.type === 'string' ? part.type : 'unknown'} content omitted: this release passes text through only]`)
       .join('\n');
 
     return {
       text: this.#guard.guard(this.#server, tool.name, text),
-      isError: reply.isError === true,
+      isError: Object.hasOwn(reply, 'isError') && reply.isError !== false,
     };
   }
 }
